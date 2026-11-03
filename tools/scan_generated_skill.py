@@ -32,77 +32,14 @@ SUPPORTING_FILENAMES = ("glossary.md", "patterns.md", "cheatsheet.md")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from book_to_skill.sanitize import is_invisible_codepoint  # noqa: E402
 
-_CONTENT_RULES = (
-    (
-        "prompt.ignore_previous",
-        re.compile(
-            r"\bignore\s+(?:(?:all|any|the)\s+)?(?:previous|prior)\s+"
-            r"(?:instructions?|prompts?|rules?|messages?)\b",
-            re.IGNORECASE,
-        ),
-        "contains an instruction-override phrase",
-    ),
-    (
-        "prompt.disregard_system",
-        re.compile(r"\bdisregard\s+(?:the\s+)?(?:system|developer)\b", re.IGNORECASE),
-        "contains a system-instruction override phrase",
-    ),
-    (
-        "prompt.role_reassignment",
-        re.compile(r"\byou\s+are\s+now\b", re.IGNORECASE),
-        "contains a role-reassignment phrase",
-    ),
-    (
-        "prompt.fake_system_prefix",
-        re.compile(r"^\s*(?:[-*]\s*)?(?:system|developer)\s*:", re.IGNORECASE),
-        "contains a system-like message prefix",
-    ),
-    (
-        "prompt.system_tag",
-        re.compile(r"<\s*/?\s*system\b[^>]*>", re.IGNORECASE),
-        "contains a system-message tag",
-    ),
-    (
-        "prompt.chat_template_tag",
-        re.compile(r"<\|\s*im_start\s*\|>|\[\s*INST\s*\]", re.IGNORECASE),
-        "contains a model chat-template delimiter",
-    ),
-    (
-        # Only the delimited forms — a token, not the English phrase. The
-        # families below are the ones that appear in real chat templates and
-        # tool-calling protocols:
-        #
-        #   <tool_call> … </tool_call>     Hermes / Qwen style
-        #   <|tool_call|>                  special-token style
-        #   [TOOL_CALL] / [/tool_call]     bracket style
-        #   {{tool_call}}                  template placeholder
-        #   "tool_call"                    JSON key or value
-        #
-        # Matching bare prose instead fired on every book that explains what a
-        # tool call is — the agent and prompting books this converter is most
-        # used on. A gate that always trips on a whole category teaches people
-        # to wave it through, which costs more than the false positive itself.
-        "prompt.tool_call_tag",
-        re.compile(
-            r"""<\|?\s*/?\s*tool[_ -]?call\s*\|?>      # <tool_call>, </tool_call>, <|tool_call|>
-              | \[\s*/?\s*tool[_ -]?call\s*\]          # [TOOL_CALL], [/tool_call]
-              | \{\{\s*/?\s*tool[_ -]?call\s*\}\}      # {{tool_call}}
-              | "\s*tool[_ -]?call\s*"                 # JSON key or value
-            """,
-            re.IGNORECASE | re.VERBOSE,
-        ),
-        "contains a tool-call control token",
-    ),
-)
-
-_EXFILTRATION_TERM = re.compile(r"\bexfiltrat(?:e|es|ed|ing|ion)\b", re.IGNORECASE)
-_OUTBOUND_TERM = re.compile(
-    r"\b(?:curl|wget|send|post|upload|transmit)\b|https?://",
-    re.IGNORECASE,
-)
-_SENSITIVE_TERM = re.compile(
-    r"(?:\.env\b|\bbase64\b|\bsecrets?\b|\bcredentials?\b|\bapi[_ -]?keys?\b)",
-    re.IGNORECASE,
+# Rule tables are owned by book_to_skill/safety_gate.py so that extraction, the
+# generated-skill scan and the gate CLI classify with one definition.
+from book_to_skill.safety_gate import (  # noqa: E402
+    _CONTENT_RULES,
+    _EXECUTABLE_RULES,
+    _EXFILTRATION_TERM,
+    _OUTBOUND_TERM,
+    _SENSITIVE_TERM,
 )
 
 
@@ -258,7 +195,7 @@ def _scan_text(relative_path: str, text: str) -> list[Finding]:
                 )
             )
 
-        for rule_id, pattern, message in _CONTENT_RULES:
+        for rule_id, pattern, message in _CONTENT_RULES + _EXECUTABLE_RULES:
             if pattern.search(line):
                 findings.append(Finding(relative_path, line_number, rule_id, message))
 

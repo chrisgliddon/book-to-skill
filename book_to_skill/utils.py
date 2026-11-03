@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import dataclasses
 import json
 import os
 import re
@@ -57,6 +58,7 @@ from book_to_skill.parsers.epub import (
     count_epub_images,
 )
 from book_to_skill.sanitize import sanitize_extracted_text
+from book_to_skill import safety_gate
 
 
 # Covers and decorative assets are common in prose EPUBs, so only surface the
@@ -1243,6 +1245,8 @@ def parse_arguments(argv: list[str]) -> tuple[list[str], str, str]:
             i += 1
         elif arg == "--pdf-page-sidecar":
             i += 1
+        elif arg == "--safety-override":
+            i += 1
         elif arg.startswith("-"):
             print(f"WARNING: Unknown flag '{arg}' — ignoring it.", file=sys.stderr)
             i += 1
@@ -1791,7 +1795,7 @@ def print_usage() -> None:
     print(
         "Usage: book-to-skill <path-to-document-folder-or-glob>... "
         "[--mode technical|text] [--install-missing ask|yes|no] "
-        "[--pdf-page-sidecar]",
+        "[--pdf-page-sidecar] [--safety-override]",
         file=sys.stderr,
     )
     print(
@@ -1799,6 +1803,38 @@ def print_usage() -> None:
         file=sys.stderr,
     )
     print(f"Supported formats: {supported_formats_message()}", file=sys.stderr)
+
+
+def _print_safety_findings(report: dict) -> None:
+    for item in report["findings"]:
+        tag = "BLOCK" if item["severity"] == safety_gate.BLOCK else "WARN "
+        print(f"     {tag} {item['path']}:{item['line']} [{item['rule_id']}] {item['message']}", file=sys.stderr)
+
+
+def run_self_audit() -> int | None:
+    """Refuse to run from a converter tree that fails the phone-home audit.
+
+    Returns an exit code to stop with, or None when the tree passes. A copy
+    that gained a network import, an unlisted shell-out or an embedded payload
+    stops here, before any document is opened or dependency installed.
+    """
+    root = safety_gate.converter_root()
+    try:
+        findings = safety_gate.audit_converter(root)
+    except safety_gate.GateError as exc:
+        print(f"ERROR: converter self-audit incomplete: {exc}", file=sys.stderr)
+        return safety_gate.EXTRACT_EXIT_SELF_AUDIT_FAILED
+    report = safety_gate.report_dict(findings, subject="converter", root=str(root))
+    if report["verdict"] != safety_gate.BLOCK:
+        return None
+    print(
+        f"ERROR: converter self-audit BLOCKED ({report['blocking']} finding(s)) in {root}. "
+        "Refusing to extract. Verify the install against https://github.com/virgiliojr94/book-to-skill "
+        "(see SECURITY-NOTICE.md).",
+        file=sys.stderr,
+    )
+    _print_safety_findings(report)
+    return safety_gate.EXTRACT_EXIT_SELF_AUDIT_FAILED
 
 
 def main():
@@ -1810,6 +1846,11 @@ def main():
 
     if "--check" in sys.argv[1:]:
         sys.exit(run_dependency_check())
+
+    self_audit_exit = run_self_audit()
+    if self_audit_exit is not None:
+        sys.exit(self_audit_exit)
+    safety_override = "--safety-override" in sys.argv[1:]
 
     if len(sys.argv) < 2:
         print_usage()
@@ -1854,7 +1895,43 @@ def main():
         
     # Combine texts
     consolidated_text = "".join(combined_texts).strip()
-    
+
+    # Content gate. Runs before full_text.txt exists so blocked text never has
+    # a path the agent could read; the report is written either way.
+    safety_findings = safety_gate.classify_text(consolidated_text)
+    safety_verdict = safety_gate.verdict_for(safety_findings)
+    safety_blocked = safety_verdict == safety_gate.BLOCK
+    if safety_blocked and not safety_override:
+        safety_findings = [
+            dataclasses.replace(f, path=safety_gate.QUARANTINE_FILENAME) for f in safety_findings
+        ]
+    safety_report = safety_gate.report_dict(
+        safety_findings,
+        subject="extracted",
+        override=bool(safety_blocked and safety_override),
+        workdir=str(OUTPUT_DIR),
+    )
+    safety_path = OUTPUT_DIR / safety_gate.SAFETY_FILENAME
+    safety_path.write_text(safety_gate.dump_report(safety_report), encoding="utf-8")
+    if safety_blocked and not safety_override:
+        quarantine_path = OUTPUT_DIR / safety_gate.QUARANTINE_FILENAME
+        with quarantine_path.open("w", encoding="utf-8", newline="\n") as quarantine_file:
+            quarantine_file.write(consolidated_text)
+        print(
+            f"\nERROR: extraction BLOCKED by the safety gate: {safety_report['blocking']} blocking "
+            f"finding(s) ({safety_report['advisory']} advisory). full_text.txt was NOT written.",
+            file=sys.stderr,
+        )
+        _print_safety_findings(safety_report)
+        print(f"   Safety  -> BLOCK  {safety_path}", file=sys.stderr)
+        print(f"   Text    -> quarantined at {quarantine_path} (review by line number; do not load)", file=sys.stderr)
+        print(
+            "   Re-run with --safety-override only after a human has reviewed the findings; "
+            "the override is recorded in safety.json and metadata.json.",
+            file=sys.stderr,
+        )
+        sys.exit(safety_gate.EXTRACT_EXIT_CONTENT_BLOCKED)
+
     # Preserve existing source line endings. On Windows, the default newline
     # translation turns an extracted CRLF into CRCRLF and breaks setext headings
     # when the persisted corpus is read back.
@@ -1945,6 +2022,14 @@ def main():
         # run created, without having to reconstruct the per-run default path.
         "workdir": str(OUTPUT_DIR),
         "output_text": str(OUTPUT_TEXT),
+        "safety": {
+            "verdict": safety_verdict,
+            "override": safety_report["override"],
+            "blocking": safety_report["blocking"],
+            "advisory": safety_report["advisory"],
+            "rules_version": safety_gate.RULES_VERSION,
+            "report": str(safety_path),
+        },
         "total_sources": len(extracted_sources),
         "sources": [
             {
@@ -2031,6 +2116,12 @@ def main():
     print(f"\n   Workdir -> {OUTPUT_DIR}")
     print(f"   Text    -> {OUTPUT_TEXT}")
     print(f"   Meta    -> {OUTPUT_META}")
+    if safety_report["override"]:
+        print(f"   Safety  -> BLOCK overridden by --safety-override ({safety_report['blocking']} blocking, {safety_report['advisory']} advisory) {safety_path}")
+    elif safety_verdict == safety_gate.WARN:
+        print(f"   Safety  -> WARN ({safety_report['advisory']} advisory finding(s); review before generating) {safety_path}")
+    else:
+        print(f"   Safety  -> PASS {safety_path}")
     if page_sidecar is not None:
         print(f"   PDF pages -> {page_sidecar}")
     if errors:

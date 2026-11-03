@@ -87,7 +87,9 @@ converter does not infer arbitrary `skills.load.extraDirs`.
 | `book_to_skill/sanitize.py` | strips zero-width / Unicode-tag-block characters from extracted text, and folds Kangxi radicals to their ideographs (see Security) |
 | `tools/discovery_tax.py` | measures token cost vs context-dump / discovery loop |
 | `tools/validate_skill.py` | checks a generated SKILL.md against host rules (`--lens claude\|copilot\|amp\|hermes\|openclaw\|opencode`) |
-| `tools/scan_generated_skill.py` | advisory prompt-injection scan of a generated skill (see Security) |
+| `book_to_skill/safety_gate.py` | rule tables, extracted-text classifier and converter self-audit; the extractor calls both (see Security) |
+| `tools/safety_gate.py` | gate CLI: `self` / `extracted <workdir>` / `generated <skill-dir>`, exit 0 pass · 1 block · 2 incomplete |
+| `tools/scan_generated_skill.py` | advisory prompt-injection scan of a generated skill; rules imported from `safety_gate` (see Security) |
 | `SKILL.md` | the generator spec (Steps 0–10 + fold-in workflow) |
 
 ## Security
@@ -134,7 +136,34 @@ is layered:
   exfiltration-shaped content across the generated `SKILL.md`, `chapters/*.md`,
   `glossary.md`, `patterns.md`, and `cheatsheet.md`. Findings name only the rule and
   file location — never the matched text.
-- **CI** — CodeQL, Bandit (gate on HIGH), Zizmor, and dependency CVE review on PRs.
+- **Safety gate** (`book_to_skill/safety_gate.py`, `tools/safety_gate.py`) — the
+  deterministic, blocking layer the extractor cannot skip. Three subjects:
+  - *converter self-audit* — runs at every extractor start and in CI. Parses the
+    runtime surface (`book_to_skill/`, `scripts/`, `tools/`, `SKILL.md`) with
+    `ast` and blocks on network/IPC imports, `eval`/`exec`/dynamic import,
+    payload decoders (`base64`, `zlib`, `fromhex`, hex-escape runs, opaque blobs),
+    `subprocess` with `shell=True` or a command outside the allowlist
+    (`pdftotext`, `pdfinfo`, `ebook-convert`, `git`, `python -m pip`), secret-shaped
+    environment reads, wallet/browser/credential path literals, URLs outside the
+    documented hosts, raw `IP:port` literals, bidi controls in source, and any
+    binary, archive or shell-script file. Exit code 4 from the extractor; nothing is
+    opened or installed first.
+  - *extracted text* — classified before `full_text.txt` is written. Blocking
+    rules: residual invisible Unicode, chat-template / system / tool-call tokens,
+    download-and-execute pipelines, decode-and-run shapes, base64 data URIs,
+    secret-bearing query strings, exfiltration language. Prose-shaped phrases
+    (instruction override, role reassignment, concealment from the user, text
+    addressed to an AI) are advisory. On block the text goes to
+    `quarantined_text.txt`, `safety.json` records the findings, no
+    `metadata.json` is written, and the extractor exits 3. `--safety-override`
+    writes normally and records the override in both files.
+  - *generated skill* — the Step 9.5 gate; same rules over the scanner's bounded
+    file set, with the same block/advisory split.
+  The scope is static shapes. It does not catch a hostile fork that also removes
+  the gate; verifying the install source (SECURITY-NOTICE.md) remains the
+  out-of-band control for that.
+- **CI** — CodeQL, Bandit (gate on HIGH), safety-gate self-audit (hard gate),
+  Zizmor, and dependency CVE review on PRs.
 
 ## Extending
 

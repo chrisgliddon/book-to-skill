@@ -47,6 +47,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ENTRY_POINTS = {
     "scripts/extract.py": "book-to-skill · turns a document into a structured agent skill",
     "tools/scan_generated_skill.py": "usage: scan_generated_skill.py [-h] path",
+    "tools/safety_gate.py": "usage: safety_gate.py [-h] [--json] {self,extracted,generated} [path]",
     "tools/discovery_tax.py": (
         "usage: discovery_tax.py [-h] --full-text FULL_TEXT [--skill-dir SKILL_DIR]"
     ),

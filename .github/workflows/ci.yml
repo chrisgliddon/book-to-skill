@@ -105,6 +105,10 @@ jobs:
         run: bandit -q -r book_to_skill scripts tools --severity-level high --confidence-level medium
       - name: Bandit — report MEDIUM+ (informational)
         run: bandit -q -r book_to_skill scripts tools -ll || true
+      - name: Safety gate — converter self-audit (hard gate)
+        # Deterministic AST/literal rules: network imports, shell-outs outside the
+        # allowlist, payload decoders, secret/wallet paths, unknown URLs, binaries.
+        run: python3 tools/safety_gate.py self
       - name: Zizmor — workflow audit (informational)
         # Surfaces GitHub Actions risks (injection, pull_request_target misuse).
         # Currently only flags unpinned-uses (tags vs SHA) — non-blocking until

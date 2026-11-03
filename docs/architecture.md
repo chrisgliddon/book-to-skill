@@ -146,8 +146,8 @@ is layered:
     (`pdftotext`, `pdfinfo`, `ebook-convert`, `git`, `python -m pip`), secret-shaped
     environment reads, wallet/browser/credential path literals, URLs outside the
     documented hosts, raw `IP:port` literals, bidi controls in source, any
-    binary, archive, hidden or shell-script file. Stray `__pycache__` bytecode
-    is reported as advisory; the entry points set `sys.pycache_prefix` to a
+    binary, archive, hidden, shell-script or sourceless `.pyc` file. Stray
+    `__pycache__` bytecode is reported as advisory; the entry points set `sys.pycache_prefix` to a
     fresh empty directory before importing, so a planted `.pyc` beside a clean
     source is never loaded. Exit code 4 from the extractor; nothing is
     opened or installed first.

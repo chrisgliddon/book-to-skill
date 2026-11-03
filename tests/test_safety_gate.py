@@ -393,12 +393,17 @@ def test_entry_points_never_load_shadowing_bytecode(tmp_path):
     assert (workdir / "full_text.txt").is_file()
 
 
-def test_self_audit_tolerates_bytecode_in_a_package_install(tmp_path):
+@pytest.mark.parametrize("name", ["beacon.pyc", "beacon.pyo"])
+def test_self_audit_blocks_sourceless_bytecode_everywhere(tmp_path, name):
+    # pycache_prefix does not apply to a bare .pyc beside the sources: Python
+    # imports it directly with nothing to audit. No install location is exempt.
     root = tmp_path / "venv" / "lib" / "site-packages"
-    (root / "book_to_skill" / "__pycache__").mkdir(parents=True)
+    (root / "book_to_skill").mkdir(parents=True)
     (root / "book_to_skill" / "__init__.py").write_text("", encoding="utf-8")
-    (root / "book_to_skill" / "__pycache__" / "__init__.cpython-312.pyc").write_bytes(b"\x00" * 32)
-    assert gate.audit_converter(root) == []
+    (root / "book_to_skill" / name).write_bytes(b"\x00" * 32)
+    findings = gate.audit_converter(root)
+    assert _rule_ids(findings) == ["self.binary_or_script_file"]
+    assert gate.verdict_for(findings) == gate.BLOCK
 
 
 def test_self_audit_blocks_hidden_files_but_tolerates_finder_metadata(tmp_path):

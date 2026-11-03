@@ -390,7 +390,7 @@ _HEX_BLOB = re.compile(r"^[0-9A-Fa-f]{64,}$")
 
 SUSPICIOUS_EXTENSIONS = frozenset({
     ".exe", ".dll", ".so", ".dylib", ".pyd", ".pyc", ".zip", ".tar", ".gz", ".tgz",
-    ".bz2", ".xz", ".7z", ".rar", ".bin", ".dat", ".sh", ".bash", ".zsh", ".ps1",
+    ".bz2", ".xz", ".7z", ".rar", ".bin", ".dat", ".pyo", ".sh", ".bash", ".zsh", ".ps1",
     ".bat", ".cmd", ".vbs", ".js", ".mjs", ".jar", ".dmg", ".pkg", ".msi", ".app",
 })
 MAX_SOURCE_FILE_BYTES = 2 * 1024 * 1024
@@ -556,31 +556,29 @@ def _audit_markdown(relative: str, text: str) -> list[Finding]:
 
 # Finder metadata is inert and present on every macOS checkout.
 TOLERATED_HIDDEN_FILES = frozenset({".DS_Store"})
-_PACKAGE_INSTALL_DIRS = frozenset({"site-packages", "dist-packages"})
-
-
-def _is_package_install(root: Path) -> bool:
-    """A pip/uv install compiles bytecode next to the sources it wrote, so
-    there the two are equally trusted. Everywhere else (a git checkout, a
-    skills-directory install) the entry points set ``sys.dont_write_bytecode``
-    and no bytecode should exist at all."""
-    return any(part in _PACKAGE_INSTALL_DIRS for part in root.parts)
 
 
 def _walk_surface(root: Path) -> tuple[list[Path], list[Finding]]:
     """Files to audit, plus findings for entries that must not exist.
 
-    Bytecode is reported, not skipped: Python loads a ``__pycache__/*.pyc``
-    whose header matches the source's size and mtime *instead of* the source.
-    The entry points defeat that by pointing ``sys.pycache_prefix`` at a fresh
-    empty directory before importing the package, so the finding is advisory:
-    it tells the user the tree is not clean, it does not mean the bytecode ran.
+    Two kinds of bytecode, treated differently because Python loads them
+    differently:
+
+    * ``__pycache__/*.pyc`` is loaded *instead of* a source whose size and
+      mtime its header matches. The entry points defeat that by pointing
+      ``sys.pycache_prefix`` at a fresh empty directory before importing the
+      package, so this is advisory: the tree is not clean, but the bytecode
+      did not run.
+    * A bare ``.pyc``/``.pyo`` beside the sources is sourceless bytecode, which
+      ``pycache_prefix`` does not touch: an ``import beacon`` resolves to
+      ``beacon.pyc`` with no source to audit. It stays blocking through
+      SUSPICIOUS_EXTENSIONS, in every location.
+
     Hidden files block -- nothing in the runtime surface is meant to be hidden
     from a directory listing.
     """
     files: list[Path] = []
     findings: list[Finding] = []
-    package_install = _is_package_install(root)
     for entry in AUDIT_SURFACE:
         path = root / entry
         if path.is_symlink():
@@ -592,11 +590,11 @@ def _walk_surface(root: Path) -> tuple[list[Path], list[Finding]]:
                 relative = child.relative_to(root).as_posix()
                 if child.is_symlink():
                     raise GateError(f"{relative} is a symbolic link")
-                if "__pycache__" in child.parts or child.suffix.lower() in {".pyc", ".pyo"}:
-                    if child.is_file() and not package_install:
+                if "__pycache__" in child.parts:
+                    if child.is_file():
                         findings.append(Finding(
                             relative, 0, "bytecode.present",
-                            "stray bytecode in the runtime surface (entry points ignore it); delete __pycache__",
+                            "stray __pycache__ bytecode (entry points never load it); delete __pycache__",
                         ))
                     continue
                 if child.name.startswith(".") and child.name not in TOLERATED_HIDDEN_FILES:

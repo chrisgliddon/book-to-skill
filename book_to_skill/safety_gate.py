@@ -554,8 +554,33 @@ def _audit_markdown(relative: str, text: str) -> list[Finding]:
     return findings
 
 
-def _walk_surface(root: Path) -> list[Path]:
+# Finder metadata is inert and present on every macOS checkout.
+TOLERATED_HIDDEN_FILES = frozenset({".DS_Store"})
+_PACKAGE_INSTALL_DIRS = frozenset({"site-packages", "dist-packages"})
+
+
+def _is_package_install(root: Path) -> bool:
+    """A pip/uv install compiles bytecode next to the sources it wrote, so
+    there the two are equally trusted. Everywhere else (a git checkout, a
+    skills-directory install) the entry points set ``sys.dont_write_bytecode``
+    and no bytecode should exist at all."""
+    return any(part in _PACKAGE_INSTALL_DIRS for part in root.parts)
+
+
+def _walk_surface(root: Path) -> tuple[list[Path], list[Finding]]:
+    """Files to audit, plus findings for entries that must not exist.
+
+    Bytecode is reported, not skipped: Python loads a ``__pycache__/*.pyc``
+    whose header matches the source's size and mtime *instead of* the source.
+    The entry points defeat that by pointing ``sys.pycache_prefix`` at a fresh
+    empty directory before importing the package, so the finding is advisory:
+    it tells the user the tree is not clean, it does not mean the bytecode ran.
+    Hidden files block -- nothing in the runtime surface is meant to be hidden
+    from a directory listing.
+    """
     files: list[Path] = []
+    findings: list[Finding] = []
+    package_install = _is_package_install(root)
     for entry in AUDIT_SURFACE:
         path = root / entry
         if path.is_symlink():
@@ -564,13 +589,25 @@ def _walk_surface(root: Path) -> list[Path]:
             files.append(path)
         elif path.is_dir():
             for child in sorted(path.rglob("*")):
-                if "__pycache__" in child.parts or child.name.startswith("."):
-                    continue
+                relative = child.relative_to(root).as_posix()
                 if child.is_symlink():
-                    raise GateError(f"{child.relative_to(root).as_posix()} is a symbolic link")
+                    raise GateError(f"{relative} is a symbolic link")
+                if "__pycache__" in child.parts or child.suffix.lower() in {".pyc", ".pyo"}:
+                    if child.is_file() and not package_install:
+                        findings.append(Finding(
+                            relative, 0, "bytecode.present",
+                            "stray bytecode in the runtime surface (entry points ignore it); delete __pycache__",
+                        ))
+                    continue
+                if child.name.startswith(".") and child.name not in TOLERATED_HIDDEN_FILES:
+                    if child.is_file():
+                        findings.append(Finding(relative, 0, "self.hidden_file", "is a hidden file in the runtime surface"))
+                    continue
+                if child.name in TOLERATED_HIDDEN_FILES:
+                    continue
                 if child.is_file():
                     files.append(child)
-    return sorted(files, key=lambda p: p.relative_to(root).as_posix().lower())
+    return sorted(files, key=lambda p: p.relative_to(root).as_posix().lower()), findings
 
 
 def audit_converter(root: Path) -> list[Finding]:
@@ -582,8 +619,8 @@ def audit_converter(root: Path) -> list[Finding]:
     root = root.expanduser().resolve()
     if not (root / "book_to_skill").is_dir():
         raise GateError(f"{root} does not contain the book_to_skill package")
-    findings: list[Finding] = []
-    for path in _walk_surface(root):
+    files, findings = _walk_surface(root)
+    for path in files:
         relative = path.relative_to(root).as_posix()
         size = path.stat().st_size
         if size > MAX_SOURCE_FILE_BYTES:

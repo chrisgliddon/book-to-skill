@@ -11,6 +11,13 @@ import sys
 
 if __name__ == "__main__":
     sys.dont_write_bytecode = True
+    # Never *read* bytecode beside the source either. Python loads a
+    # __pycache__/*.pyc whose header matches the source's size and mtime in
+    # place of that source, so a planted .pyc would run while every source
+    # audit passes. With pycache_prefix set, lookups go only to this fresh,
+    # empty, private directory, and dont_write_bytecode keeps it empty.
+    import tempfile as _tempfile
+    sys.pycache_prefix = _tempfile.mkdtemp(prefix="book-to-skill-no-bytecode-")
 from pathlib import Path
 from typing import Sequence
 

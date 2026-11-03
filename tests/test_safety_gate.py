@@ -119,7 +119,11 @@ def test_scanner_shares_the_rule_tables():
 # --------------------------------------------------------------------------
 
 def test_the_real_converter_passes_its_own_audit():
-    assert gate.audit_converter(ROOT) == []
+    # Stray __pycache__ from an earlier test subprocess is advisory, not a
+    # failure of the checkout; anything blocking is.
+    findings = gate.audit_converter(ROOT)
+    assert [f for f in findings if f.severity == gate.BLOCK] == []
+    assert {f.rule_id for f in findings} <= {"bytecode.present"}
 
 
 def _tree(tmp_path: Path, module_source: str, extra: dict | None = None) -> Path:
@@ -252,7 +256,7 @@ def test_cli_extracted_reads_a_workdir(tmp_path, capsys):
 
 def test_cli_self_passes_on_the_checkout(capsys):
     assert cli.main(["self", str(ROOT)]) == gate.EXIT_PASS
-    assert "verdict: PASS" in capsys.readouterr().out
+    assert "(0 blocking," in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------
@@ -334,3 +338,69 @@ def test_extractor_refuses_to_run_from_a_tampered_copy(tmp_path):
     assert "self-audit BLOCKED" in result.stderr
     assert "self.forbidden_import" in result.stderr
     assert not workdir.exists()
+
+
+def test_self_audit_reports_stray_bytecode_as_advisory(tmp_path):
+    root = _tree(tmp_path, "")
+    cache = root / "book_to_skill" / "__pycache__"
+    cache.mkdir()
+    (cache / "mod.cpython-312.pyc").write_bytes(b"\x00" * 32)
+    findings = gate.audit_converter(root)
+    assert _rule_ids(findings) == ["bytecode.present"]
+    assert gate.verdict_for(findings) == gate.WARN
+
+
+def _shadow_pyc(source: Path, code_source: str) -> Path:
+    """Write a .pyc for ``source`` compiled from *different* code, with a header
+    that matches the source's mtime and size so a default import prefers it."""
+    import importlib.util
+    import marshal
+    import struct
+
+    code = compile(code_source, str(source), "exec")
+    stat = source.stat()
+    header = importlib.util.MAGIC_NUMBER + struct.pack("<III", 0, int(stat.st_mtime) & 0xFFFFFFFF, stat.st_size & 0xFFFFFFFF)
+    cache = importlib.util.cache_from_source(str(source))
+    Path(cache).parent.mkdir(exist_ok=True)
+    Path(cache).write_bytes(header + marshal.dumps(code))
+    return Path(cache)
+
+
+def test_entry_points_never_load_shadowing_bytecode(tmp_path):
+    copy = tmp_path / "copy"
+    for name in ("book_to_skill", "scripts", "tools"):
+        shutil.copytree(
+            ROOT / name, copy / name,
+            ignore=lambda _d, names: [n for n in names if n == "__pycache__" or n.endswith(".pyc")],
+        )
+    target = copy / "book_to_skill" / "sanitize.py"
+    _shadow_pyc(target, "raise SystemExit(99)")
+    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"}}
+
+    # Control: a plain import from this tree runs the planted bytecode.
+    control = subprocess.run(
+        [sys.executable, "-c", "import book_to_skill.sanitize"],
+        cwd=copy, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert control.returncode == 99, control.stderr
+
+    # The real entry point runs the audited source instead.
+    source = tmp_path / "book.txt"
+    source.write_text(CLEAN, encoding="utf-8")
+    workdir = tmp_path / "work"
+    result = _extract(copy / "scripts" / "extract.py", source, workdir)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (workdir / "full_text.txt").is_file()
+
+
+def test_self_audit_tolerates_bytecode_in_a_package_install(tmp_path):
+    root = tmp_path / "venv" / "lib" / "site-packages"
+    (root / "book_to_skill" / "__pycache__").mkdir(parents=True)
+    (root / "book_to_skill" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "book_to_skill" / "__pycache__" / "__init__.cpython-312.pyc").write_bytes(b"\x00" * 32)
+    assert gate.audit_converter(root) == []
+
+
+def test_self_audit_blocks_hidden_files_but_tolerates_finder_metadata(tmp_path):
+    root = _tree(tmp_path, "", {"tools/.DS_Store": b"\x00", "tools/.helper.py": "import socket\n"})
+    assert _rule_ids(gate.audit_converter(root)) == ["self.hidden_file"]
